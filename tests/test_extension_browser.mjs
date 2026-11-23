@@ -35,7 +35,7 @@ try{
   const base=await new Promise((resolve,reject)=>{let data='';server.stdout.on('data',chunk=>{data+=chunk;if(data.includes('\n'))resolve(JSON.parse(data.split('\n')[0]).url);});server.on('error',reject);server.stderr.on('data',chunk=>faults.push(String(chunk)));});
   const extension=path.join(temp,'extension');await cp(path.join(root,'extension'),extension,{recursive:true});
   for(const file of ['manifest.json','background.js']){const value=await readFile(path.join(extension,file),'utf8');await writeFile(path.join(extension,file),value.replaceAll('http://127.0.0.1:8840',base));}
-  const edge='C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
+  const edge=process.env.EDGE_PATH||'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
   browser=spawn(edge,['--headless=new','--remote-debugging-port=0',`--user-data-dir=${path.join(temp,'profile')}`,`--disable-extensions-except=${extension}`,`--load-extension=${extension}`,'--enable-unsafe-extension-debugging','--no-first-run','--no-default-browser-check','--disable-background-networking','--host-resolver-rules=MAP nu.instructure.com ~NOTFOUND, MAP classroom.google.com ~NOTFOUND','about:blank'],{windowsHide:true,stdio:'ignore'});
   let lines;
   for(let i=0;i<100;i++){try{lines=(await readFile(path.join(temp,'profile','DevToolsActivePort'),'utf8')).split('\n');break;}catch{await sleep(150);}}
