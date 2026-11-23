@@ -1,0 +1,9 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>Study Dock 采集助手</title><link rel="stylesheet" href="popup.css"><script src="popup.js" defer></script></head>
+<body><header><span class="mark">S</span><div><strong>Study Dock</strong><small>已登录网页采集助手</small></div></header>
+<p class="intro">自己在官方页面登录，再把课程与作业汇总到本机网页。</p>
+<section id="pairing"><label for="code">网页的一次性配对码</label><input id="code" autocomplete="off" placeholder="在网页“账号连接”中生成"><button id="pair">连接本机学习空间</button></section>
+<section id="connected" hidden><div id="user"></div><label for="offset">学校网页显示的时区</label><select id="offset"><option value="540">日本时间 UTC+9</option><option value="480">中国时间 UTC+8</option><option value="0">UTC</option></select>
+<article><h2>Canvas</h2><p id="canvasLabel">尚未绑定</p><div class="actions"><button data-open="canvas" class="secondary">打开登录页</button><button data-bind="canvas">绑定并同步当前账号</button></div><button data-sync="canvas" class="quiet">更新已绑定的 Canvas</button></article>
+<article><h2>Google Classroom</h2><p id="classroomLabel">尚未绑定</p><div class="actions"><button data-open="classroom" class="secondary">打开登录页</button><button data-bind="classroom">绑定并同步当前账号</button></div><button data-sync="classroom" class="quiet">更新已绑定的 Classroom</button><small>有多个 Google 账号时，先在目标 Classroom 标签页切到学校账号，再打开此插件绑定。</small></article>
+<label for="maxPages">每次最多读取页数（20–300）</label><input id="maxPages" type="number" min="20" max="300" step="10" value="150"><label class="check"><input id="auto" type="checkbox">浏览器运行时，每 15 分钟尝试更新</label><button id="stop" class="secondary">停止当前采集</button><button id="rePair" class="quiet">换一个学习空间账号 / 重新配对</button></section>
+<p id="status" role="status"></p><button data-open="portal" class="secondary full">打开网页日历 ↗</button><small class="foot">只读取允许访问的课程页面。登录过期、日期不明确或页面未加载完整时会提示；不会自动提交作业。</small></body></html>

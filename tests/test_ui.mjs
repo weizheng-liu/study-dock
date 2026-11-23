@@ -1,0 +1,66 @@
+// Real local Chrome smoke test. No external npm dependencies or real credentials.
+import {spawn} from 'node:child_process';
+import {mkdtemp, readFile, mkdir, writeFile, rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import path from 'node:path';
+const chrome = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const base = process.env.PORTAL_URL || 'http://127.0.0.1:8840';
+const output = path.resolve('test-output');
+const profile = await mkdtemp(path.join(tmpdir(), 'study-dock-browser-'));
+const browser = spawn(chrome,['--headless=new','--remote-debugging-port=0',`--user-data-dir=${profile}`,'--no-first-run','--no-default-browser-check','--disable-background-networking','about:blank'],{stdio:'ignore',windowsHide:true});
+const sleep = ms => new Promise(resolve=>setTimeout(resolve,ms));
+let socket;
+try {
+  let port;
+  for(let i=0;i<100;i++){try{port=(await readFile(path.join(profile,'DevToolsActivePort'),'utf8')).split('\n')[0];break;}catch{await sleep(150);}}
+  if(!port)throw new Error('Chrome did not start');
+  const tab = await (await fetch(`http://127.0.0.1:${port}/json/new?${encodeURIComponent(base)}`,{method:'PUT'})).json();
+  socket = new WebSocket(tab.webSocketDebuggerUrl);
+  await new Promise((resolve,reject)=>{socket.addEventListener('open',resolve,{once:true});socket.addEventListener('error',reject,{once:true});});
+  let sequence=0;const pending=new Map(),errors=[];
+  socket.addEventListener('message',event=>{const m=JSON.parse(event.data);if(m.id){const p=pending.get(m.id);if(p){pending.delete(m.id);m.error?p.reject(new Error(JSON.stringify(m.error))):p.resolve(m.result);}}else if(m.method==='Runtime.exceptionThrown')errors.push(m.params.exceptionDetails.text+': '+(m.params.exceptionDetails.exception?.description||''));});
+  const send=(method,params={})=>new Promise((resolve,reject)=>{const id=++sequence;pending.set(id,{resolve,reject});socket.send(JSON.stringify({id,method,params}));});
+  const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(result.exceptionDetails)throw new Error(result.exceptionDetails.text);return result.result.value;};
+  const waitFor=async expression=>{for(let i=0;i<80;i++){if(await evaluate(expression))return;await sleep(100);}await screenshot('failure.png');throw new Error('UI timeout: '+expression+'; body: '+await evaluate('document.body.innerText')+'; browser errors: '+errors.join('; '));};
+  const assert=(condition,message)=>{if(!condition)throw new Error(message);};
+  const screenshot=async name=>{await mkdir(output,{recursive:true});const image=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:true});await writeFile(path.join(output,name),Buffer.from(image.data,'base64'));};
+  await send('Runtime.enable');await send('Page.enable');
+  await send('Emulation.setDeviceMetricsOverride',{width:1440,height:1100,deviceScaleFactor:1,mobile:false});
+  await send('Page.navigate',{url:base+'/?demo=1#assignments'});
+  await waitFor('document.querySelectorAll(".day").length===42');
+  assert(await evaluate('document.querySelector("h1").textContent==="作业日历"'),'Calendar heading');
+  await screenshot('assignments-desktop.png');
+  await evaluate('document.querySelector(".cal-task").click()');
+  await waitFor('document.querySelector("#detail").open');
+  assert(await evaluate('document.querySelector("#detailBody").textContent.includes("作业要求")'),'Requirements missing');
+  await evaluate('document.querySelector("#detail").close();document.querySelector("a[href=\\"#courses\\"]").click()');
+  await waitFor('document.querySelectorAll(".course-card").length===6');
+  await evaluate('document.querySelector(".course-card button").click()');
+  await waitFor('!!document.querySelector(".tabs")');
+  await evaluate('[...document.querySelectorAll(".tab")].find(x=>x.textContent==="学习资料").click()');
+  await waitFor('!!document.querySelector(".resource-row")');
+  await screenshot('course-materials-desktop.png');
+  await evaluate('document.querySelector("a[href=\\"#overview\\"]").click()');
+  await waitFor('document.querySelectorAll(".stat").length===3');
+  await screenshot('overview-desktop.png');
+  await evaluate('document.querySelector("a[href=\\"#connections\\"]").click()');
+  await waitFor('document.querySelectorAll(".browser-step").length===3');
+  assert(await evaluate('!!document.querySelector("a[href=\\"/extension.zip\\"]")'),'Extension download missing');
+  await screenshot('browser-connections-desktop.png');
+  await evaluate('document.querySelector("a[href=\\"#assignments\\"]").click()');
+  await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
+  await waitFor('document.querySelectorAll(".day").length===42');
+  assert(await evaluate('document.documentElement.scrollWidth <= window.innerWidth'),'Mobile horizontal overflow');
+  await screenshot('assignments-mobile.png');
+  await send('Emulation.setDeviceMetricsOverride',{width:1440,height:1000,deviceScaleFactor:1,mobile:false});
+  await send('Page.navigate',{url:base+'/'});
+  await waitFor('!!document.querySelector("#username")');
+  await screenshot('login-desktop.png');
+  assert(errors.length===0,'Browser errors: '+errors.join('\n'));
+  console.log('PASS: calendar, requirements dialog, course material tabs, dashboard, mobile layout, login; no browser exceptions.');
+} finally {
+  if(socket?.readyState===WebSocket.OPEN)socket.close();
+  browser.kill();
+  await sleep(700);
+  await rm(profile,{recursive:true,force:true}).catch(()=>{});
+}

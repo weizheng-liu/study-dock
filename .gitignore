@@ -1,0 +1,13 @@
+data/
+app_config.json
+credentials*.json
+token*.json
+__pycache__/
+*.pyc
+.venv/
+test-output/
+.env
+.env.*
+*.zip
+node_modules/
+.openai/

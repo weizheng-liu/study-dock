@@ -1,0 +1,12 @@
+{
+  "base_url": "http://127.0.0.1:8840",
+  "canvas": {
+    "base_url": "https://nu.instructure.com",
+    "client_id": "",
+    "client_secret": ""
+  },
+  "classroom": {
+    "client_id": "",
+    "client_secret": ""
+  }
+}

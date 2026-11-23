@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "Study Dock · 课程采集助手",
+  "description": "从你已登录的 Canvas 和 Classroom 页面读取课程、作业和资料，汇总到本机学习空间。",
+  "version": "0.3.0",
+  "permissions": [
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://nu.instructure.com/*",
+    "https://classroom.google.com/*",
+    "http://127.0.0.1:8840/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Study Dock 采集助手"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://nu.instructure.com/*",
+        "https://classroom.google.com/*"
+      ],
+      "js": [
+        "collector.js",
+        "text_entry.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4/biWjBO2GWtNUoKQPz8vpzi8mugcJOPJR46djUJ3wiT9n3JNSsYVlLd2jCv11r526C8Q/ympOi9ytHxhdkxXAVIitrpDPBuGmeCKrcRiKujdsGtQALEGYUYhoqIym+lE3ZKk+1aCJ5Pa1uQn5qNDDkds+YKZ5tyRlN/Z1k+8fKMXZ8eo8pl2krHYiAEo/BqPArjKhVQsGdFwZakHNrn+ONodlw4LpZ2PZa0gOCoSWf0DG9AUUHYni3UZwTCm5Bqrdl7q6m3JqB43uAxKI+0A7Ziv6DJEr01J3zyh/P7/epjq+u1wJccWzq91++6CU6+FpUqZKBEAr1kwJwnnlu5XwIDAQAB"
+}
