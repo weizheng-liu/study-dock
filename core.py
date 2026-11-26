@@ -22,6 +22,10 @@ SCOPES = ["https://www.googleapis.com/auth/classroom.courses.readonly",
 class UserError(Exception):
     """A safe, actionable error; never contains a response body or credential."""
 
+    def __init__(self, message: str = "", status: int | None = None):
+        super().__init__(message)
+        self.status = status  # HTTP status from the platform, when there was one
+
 
 def now_iso() -> str:
     return datetime.now(UTC).isoformat()
@@ -160,7 +164,7 @@ def request_json(url: str, token: str = "", form: dict | None = None) -> tuple:
                 message = "Google 授权失效或配置不匹配，请重新连接。"
             else:
                 message = f"平台返回 HTTP {code}，请稍后重试。"
-            raise UserError(message) from None
+            raise UserError(message, status=code) from None
         except (URLError, TimeoutError, OSError):
             raise UserError("暂时无法连接平台，请检查网络；上次缓存会保留。") from None
         except (ValueError, UnicodeError):
@@ -296,7 +300,12 @@ def canvas_resources(base: str, token: str, course: dict) -> tuple:
                     "attachments": html_links(raw.get("message", ""), url),
                     "updated_at": raw.get("updated_at") or raw.get("posted_at"), "group": ""})
             records.extend(normalized)
-        except (UserError, ValueError, KeyError, TypeError) as error:
+        except UserError as error:
+            if error.status in (403, 404):
+                continue  # the teacher hid this tab (Files/Pages/...) from students: nothing to read
+            failed.add(f"{course['id']}:{kind}")
+            warnings.append(f"{course.get('name', '课程')}（{kind}）：{error}")
+        except (ValueError, KeyError, TypeError) as error:
             failed.add(f"{course['id']}:{kind}")
             detail = str(error) if isinstance(error, UserError) else "资料格式异常。"
             warnings.append(f"{course.get('name', '课程')}（{kind}）：{detail}")

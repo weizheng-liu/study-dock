@@ -69,7 +69,8 @@ function canvasTokenCard() {
   card.append(
     E('div', 'platform-logo canvas', 'C'),
     E('h2', '', 'Canvas · 访问令牌'),
-    E('p', '', usingToken ? '已连接：' + (connection.label || 'Canvas 账号')
+    E('p', '', connection.mode === 'oauth' ? '已通过学校 OAuth 连接。'
+      : usingToken ? '已连接：' + (connection.label || 'Canvas 账号')
       : '服务端直接调用 Canvas 官方接口，不再打开网页。令牌只保存在这台电脑。'),
     pill(usingToken ? '令牌已连接' : '尚未连接', usingToken ? 'submitted' : 'unknown'));
 
@@ -112,10 +113,21 @@ function canvasTokenCard() {
   const actions = E('div', 'row wrap');
   actions.append(link('打开 Canvas 设置 ↗', canvasUrl + '/profile/settings', 'button secondary'));
   if (usingToken) actions.append(syncNowButton(), disconnectButton('canvas', '删除令牌'));
+  if (connection.configured) {
+    // A school-approved Canvas OAuth app (app_config.json) remains an alternative to the token.
+    const oauth = button(connection.mode === 'oauth' ? '重新 OAuth 授权' : '用学校 OAuth 授权', async () => {
+      if (demo) return toast('请退出演示，登录自己的学习空间后再连接。');
+      try { location.assign((await api('/api/connect', {source: 'canvas'})).url); }
+      catch (error) { toast(error.message); }
+    }, 'button secondary');
+    oauth.disabled = state.syncing;
+    actions.append(oauth);
+  }
+  if (connection.mode === 'oauth') actions.append(syncNowButton(), disconnectButton('canvas', '解除 OAuth 连接'));
   card.append(actions);
   if (usingToken && connection.token_expires_at)
     card.append(E(connection.token_expiring ? 'div' : 'p', connection.token_expiring ? 'alert' : 'caption', tokenExpiryText(connection)));
-  if (usingToken) apiStatusLine(card, connection);
+  if (usingToken || connection.mode === 'oauth') apiStatusLine(card, connection);
   return card;
 }
 

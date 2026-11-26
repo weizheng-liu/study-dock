@@ -195,6 +195,26 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(canvas["status"]["message"], TOKEN_EXPIRED)
 
     @patch("core.request_json")
+    def test_canvas_tabs_hidden_from_students_are_not_warnings(self, read_api):
+        from core import fetch_canvas
+
+        def hidden(url, token="", form=None):
+            path = urlsplit(url).path
+            if path.endswith("/files"):
+                raise UserError("账号或学校未允许此接口访问，请检查授权或联系学校管理员。", status=403)
+            if path.endswith("/pages"):
+                raise UserError("平台返回 HTTP 404，请稍后重试。", status=404)
+            if path.endswith("/discussion_topics"):
+                raise UserError("平台返回 HTTP 500，请稍后重试。", status=500)
+            return self.fake_read_api(url, token, form)
+        read_api.side_effect = hidden
+        batch = fetch_canvas("https://nu.instructure.com", "canvas-access")
+        self.assertEqual(len(batch.items), 1)
+        self.assertEqual({r["kind"] for r in batch.resources}, {"module"})
+        self.assertEqual(batch.failed_resources, {"11:announcement"})
+        self.assertEqual(len(batch.warnings), 1)
+
+    @patch("core.request_json")
     @patch("app.request_json")
     def test_classroom_core_scopes_suffice_and_optional_kinds_are_skipped(self, exchange, read_api):
         read_api.side_effect = self.fake_read_api
