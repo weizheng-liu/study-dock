@@ -13,7 +13,7 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app import EMPTY, Portal
+from app import EMPTY, TOKEN_EXPIRED, Portal
 from core import SCOPES, UserError, export_ics, html_links
 
 
@@ -160,6 +160,39 @@ class ConnectionTests(unittest.TestCase):
         self.assertNotIn(token, str(state))
         self.assertEqual(portal.state(uid)["providers"]["canvas"]["state"], "ok")
         self.assertEqual(portal.access_token(uid, "canvas"), token)
+
+    @patch("core.request_json")
+    @patch("app.request_json")
+    def test_canvas_token_expiry_is_tracked_and_reported(self, verify, read_api):
+        from datetime import datetime, timedelta, timezone
+        portal = Portal(Path(self.temp.name) / "expiry", {})
+        uid = portal.db.register("expiry-student", "test-password-one")
+        token = "1234~" + "b" * 60
+        verify.return_value = ({"id": 7, "name": "学生"}, {})
+        read_api.side_effect = UserError("授权已过期，请重新连接账号。")
+        today = datetime.now(timezone(timedelta(hours=9))).date()
+        with self.assertRaises(UserError):
+            portal.save_canvas_token(uid, token, (today - timedelta(days=1)).isoformat())
+        with self.assertRaises(UserError):
+            portal.save_canvas_token(uid, token, "30 days")
+        portal.save_canvas_token(uid, token, (today + timedelta(days=2)).isoformat())
+        portal.executor.shutdown(wait=True)
+        canvas = portal.state(uid)["connections"]["canvas"]
+        self.assertTrue(canvas["token_expiring"])
+        self.assertEqual(canvas["token_days_left"], 2)
+        # A 401 from Canvas (token deleted early) becomes an explicit "regenerate" message.
+        self.assertEqual(canvas["status"]["message"], TOKEN_EXPIRED)
+        self.assertTrue(canvas["status"]["token_expired"])
+        # Past the recorded expiry, no request is sent at all.
+        secret = portal.db.read(uid, "secrets", {})
+        secret["canvas"]["expires_at"] = time.time() - 60
+        portal.db.write(uid, "secrets", secret)
+        read_api.reset_mock()
+        portal.sync(uid)
+        read_api.assert_not_called()
+        canvas = portal.state(uid)["connections"]["canvas"]
+        self.assertEqual(canvas["token_days_left"], -1)
+        self.assertEqual(canvas["status"]["message"], TOKEN_EXPIRED)
 
     @patch("core.request_json")
     @patch("app.request_json")

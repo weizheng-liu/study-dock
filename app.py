@@ -28,6 +28,31 @@ import study_assistant
 
 ROOT = Path(__file__).resolve().parent
 EMPTY = {"items": [], "courses": [], "resources": [], "providers": {}, "last_attempt_at": None}
+TOKEN_EXPIRED = "Canvas 访问令牌已过期或被删除。请在 Canvas「设置 → 新建访问许可证」重新生成，并在「账号连接」粘贴。"
+TOKEN_WARN_DAYS = 3
+
+
+def token_expiry(value) -> float | None:
+    """Parse the token's expiry date (YYYY-MM-DD, Japan time) into an epoch at 23:59 JST.
+
+    Canvas only lets Nihon University students issue tokens valid for up to 30 days, and
+    /users/self does not reveal the expiry, so the user enters the date Canvas showed."""
+    if value in (None, ""):
+        return None
+    from datetime import date, datetime, timedelta, timezone
+    try:
+        day = date.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        day = None
+    if day is None:
+        raise UserError("令牌到期日格式不正确。")
+    jst = timezone(timedelta(hours=9))
+    today = datetime.now(jst).date()
+    if not today <= day <= today + timedelta(days=400):
+        raise UserError("令牌到期日应在今天之后；请填写 Canvas 生成令牌时设置的有效期限。")
+    return datetime(day.year, day.month, day.day, 23, 59, tzinfo=jst).timestamp()
+
+
 CANVAS_SCOPES = ["url:GET|/api/v1/courses", "url:GET|/api/v1/courses/:course_id/assignments",
                  "url:GET|/api/v1/courses/:course_id/discussion_topics", "url:GET|/api/v1/courses/:course_id/files",
                  "url:GET|/api/v1/courses/:course_id/pages", "url:GET|/api/v1/courses/:course_id/modules",
@@ -95,6 +120,12 @@ class Portal:
             for source, token in secret.items():
                 if source in connections and token.get("kind") == "personal":
                     connections[source].update(mode="token", label=token.get("label", ""))
+                    if token.get("expires_at"):
+                        left = token["expires_at"] - time.time()
+                        connections[source].update(
+                            token_expires_at=token["expires_at"],
+                            token_days_left=max(0, int(left // 86400)) if left > 0 else -1,
+                            token_expiring=left <= TOKEN_WARN_DAYS * 86400)
                 elif source in connections:
                     connections[source].update(mode="oauth")
             browser = self.browser.info(user_id)
@@ -163,7 +194,7 @@ class Portal:
             self.clear_cache(user_id, source)
         self.schedule(user_id)
 
-    def save_canvas_token(self, user_id: int, value) -> dict:
+    def save_canvas_token(self, user_id: int, value, expires=None) -> dict:
         """Store a Canvas personal access token after checking it against /users/self.
 
         Students can generate one at Account > Settings > New Access Token without any
@@ -172,6 +203,7 @@ class Portal:
         token = value.strip() if isinstance(value, str) else ""
         if not re.fullmatch(r"[A-Za-z0-9~_.\-]{20,200}", token):
             raise UserError("请粘贴 Canvas「设置 → 新建访问许可证」生成的完整令牌。")
+        expires_at = token_expiry(expires)
         with self.lock:
             if user_id in self.busy:
                 raise UserError("同步进行中，请稍后再保存令牌。")
@@ -191,7 +223,8 @@ class Portal:
             previous = secret.get("canvas") or {}
             same_account = previous.get("kind") == "personal" and previous.get("account") == str(profile["id"])
             secret["canvas"] = {"kind": "personal", "access_token": token, "label": label,
-                                "account": str(profile["id"]), "saved_at": time.time()}
+                                "account": str(profile["id"]), "saved_at": time.time(),
+                                "expires_at": expires_at}
             self.db.write(user_id, "secrets", secret)
             browser = self.db.read(user_id, "browser", {"bindings": {}, "requests": {}})
             browser["bindings"].pop("canvas", None)
@@ -209,6 +242,8 @@ class Portal:
             if not token:
                 raise UserError("请先连接这个平台。")
             if token.get("kind") == "personal":
+                if token.get("expires_at") and token["expires_at"] <= time.time():
+                    raise UserError(TOKEN_EXPIRED)
                 # Personal tokens have no refresh flow; a 401 tells the user to make a new one.
                 return token["access_token"]
             if token.get("expires_at", 0) <= time.time() + 60:
@@ -280,9 +315,13 @@ class Portal:
                         "last_success_at": old.get("last_success_at") if batch.warnings else now_iso(),
                         "warnings": batch.warnings, "message": "部分内容未更新，保留已有缓存。" if batch.warnings else "同步成功"}
                 except Exception as error:
+                    message = str(error) if isinstance(error, UserError) else "同步失败；已有缓存已保留，请稍后重试。"
+                    personal = secret[source].get("kind") == "personal"
+                    if personal and isinstance(error, UserError) and ("授权已过期" in message or message == TOKEN_EXPIRED):
+                        message = TOKEN_EXPIRED
                     cache["providers"][source] = {"state": "error", "attempted_at": now_iso(),
-                        "last_success_at": old.get("last_success_at"), "warnings": [],
-                        "message": str(error) if isinstance(error, UserError) else "同步失败；已有缓存已保留，请稍后重试。"}
+                        "last_success_at": old.get("last_success_at"), "warnings": [], "message": message,
+                        "token_expired": message == TOKEN_EXPIRED}
             self.db.write(user_id, "cache", cache)
         finally:
             with self.lock:
@@ -547,7 +586,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/sync":
                 return self.json({"started": self.app.schedule(user_id)})
             if path == "/api/canvas-token":
-                return self.json(self.app.save_canvas_token(user_id, body.get("token")))
+                return self.json(self.app.save_canvas_token(user_id, body.get("token"), body.get("expires")))
             if path == "/api/connect":
                 return self.json({"url": self.app.connect_url(user_id, session["id"], body.get("source", ""))})
             if path == "/api/disconnect":

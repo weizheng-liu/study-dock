@@ -6,6 +6,30 @@ function formatJst(value) {
   return new Date(value).toLocaleString('zh-CN', {timeZone: 'Asia/Tokyo'});
 }
 
+function isoDateJst(offsetDays) {
+  const day = new Date(Date.now() + 9 * 3600 * 1000 + offsetDays * 86400 * 1000);
+  return day.toISOString().slice(0, 10);
+}
+
+function tokenExpiryText(connection) {
+  if (!connection.token_expires_at) return '';
+  const date = new Date(connection.token_expires_at * 1000).toLocaleDateString('zh-CN', {timeZone: 'Asia/Tokyo'});
+  if (connection.token_days_left < 0) return '令牌已于 ' + date + ' 过期，请重新生成。';
+  if (connection.token_days_left === 0) return '令牌今天（' + date + '）到期，请尽快重新生成。';
+  return '令牌 ' + date + ' 到期，还剩 ' + connection.token_days_left + ' 天。';
+}
+
+/* Overview banner: shown when the Canvas token is about to expire or already has. */
+function tokenExpiryAlert() {
+  const connection = state?.connections?.canvas || {};
+  if (connection.mode !== 'token' || !connection.token_expiring) return null;
+  if (connection.status?.token_expired) return null;  // the sync error alert already says it
+  const alert = E('div', 'alert');
+  alert.append(E('strong', '', 'Canvas：'),
+               E('span', '', tokenExpiryText(connection) + ' 在 Canvas 设置里生成新令牌后，到「账号连接」粘贴替换即可。'));
+  return alert;
+}
+
 function apiStatusLine(card, connection) {
   const status = connection.status;
   if (!status) return;
@@ -51,8 +75,8 @@ function canvasTokenCard() {
 
   const steps = E('ol', 'caption api-steps');
   for (const text of ['点下方按钮打开 Canvas「设置」页（用学校账号登录）。',
-                      '在「已批准的集成」处点「+ 新建访问许可证」，用途写 Study Dock，到期日可以留空或设到学期末。',
-                      '复制生成的令牌（只显示一次），粘贴到下面并保存。'])
+                      '在「已批准的集成」处点「+ 新建访问许可证」，用途写 Study Dock，有效期限选最长（日大最多 30 天）。',
+                      '复制生成的令牌（只显示一次），粘贴到下面，到期日填你刚才选的日期，然后保存。'])
     steps.append(E('li', '', text));
   card.append(steps);
 
@@ -63,15 +87,21 @@ function canvasTokenCard() {
   input.spellcheck = false;
   input.placeholder = usingToken ? '粘贴新令牌以替换' : '粘贴 Canvas 访问令牌';
   input.setAttribute('aria-label', 'Canvas 访问令牌');
+  const expires = E('input', 'input api-token-expiry');
+  expires.type = 'date';
+  expires.value = isoDateJst(30);
+  expires.min = isoDateJst(0);
+  expires.title = 'Canvas 令牌的有效期限日（日本时间）';
+  expires.setAttribute('aria-label', '令牌到期日');
   const save = E('button', 'button', '保存并同步');
   save.type = 'submit';
-  form.append(input, save);
+  form.append(input, expires, save);
   form.addEventListener('submit', async event => {
     event.preventDefault();
     if (demo) return toast('请退出演示，登录自己的学习空间后再连接。');
     save.disabled = true;
     try {
-      const result = await api('/api/canvas-token', {token: input.value});
+      const result = await api('/api/canvas-token', {token: input.value, expires: expires.value});
       input.value = '';
       toast('已连接 ' + result.label + '，正在读取课程和作业。');
       await refresh(true);
@@ -83,6 +113,8 @@ function canvasTokenCard() {
   actions.append(link('打开 Canvas 设置 ↗', canvasUrl + '/profile/settings', 'button secondary'));
   if (usingToken) actions.append(syncNowButton(), disconnectButton('canvas', '删除令牌'));
   card.append(actions);
+  if (usingToken && connection.token_expires_at)
+    card.append(E(connection.token_expiring ? 'div' : 'p', connection.token_expiring ? 'alert' : 'caption', tokenExpiryText(connection)));
   if (usingToken) apiStatusLine(card, connection);
   return card;
 }
