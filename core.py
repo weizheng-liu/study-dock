@@ -323,7 +323,9 @@ def fetch_canvas(base: str, token: str) -> Batch:
     return batch
 
 
-def fetch_classroom(token: str) -> Batch:
+def fetch_classroom(token: str, granted: set | None = None) -> Batch:
+    """Read the student's own Classroom data. `granted` lists OAuth scopes the user
+    actually approved; optional resource kinds without consent are skipped, not failed."""
     root = "https://classroom.googleapis.com/v1/courses"
     courses = google_pages(root, token, "courses", {"studentId": "me", "courseStates": "ACTIVE"})
     batch = Batch(course_ids={str(c["id"]) for c in courses})
@@ -345,8 +347,10 @@ def fetch_classroom(token: str) -> Batch:
             batch.failed_courses.add(str(course["id"]))
             detail = str(error) if isinstance(error, UserError) else "作业日期或数据格式异常。"
             batch.warnings.append(f"{course.get('name', '课程')}：{detail}")
-        for kind, endpoint, key in [("material", "courseWorkMaterials", "courseWorkMaterial"),
-                                    ("announcement", "announcements", "announcements")]:
+        for kind, endpoint, key, scope in [("material", "courseWorkMaterials", "courseWorkMaterial", SCOPES[2]),
+                                           ("announcement", "announcements", "announcements", SCOPES[3])]:
+            if granted is not None and scope not in granted:
+                continue
             try:
                 resources = []
                 for item in google_pages(root + f"/{course['id']}/{endpoint}", token, key):

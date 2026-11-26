@@ -12,3 +12,4 @@
 .chat-message {margin-top:1.25rem;border-top:1px solid #dce5e2;padding-top:1rem}
 .chat-message strong,.assistant-source {display:block;margin-bottom:.4rem}
 .assistant-source {margin-top:.4rem}
+.api-steps{margin:14px 0 4px 18px;line-height:1.9}.api-token-form{margin:12px 0}.api-token-form .input{flex:1}.fallback-title{margin:40px 0 4px}

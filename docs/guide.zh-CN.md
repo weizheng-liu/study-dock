@@ -68,6 +68,8 @@ python app.py --open
 
 ## 可选的官方 API 模式
 
+> 更简单的做法：Canvas 用个人访问令牌（不需要学校批准 Developer Key），Classroom 自建 OAuth 客户端。完整步骤见 [官方接口设置](api-setup.zh-CN.md)。下面是给多人部署的 OAuth 配置说明。
+
 以下配置只用于“账号连接”底部的官方 OAuth 接入，**浏览器采集模式不需要填写它们**。
 
 将 `app_config.example.json` 复制为 `app_config.json`。保持配置文件私有，勿将 Client Secret 发进聊天、截图或代码仓库。

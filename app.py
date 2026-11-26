@@ -92,6 +92,11 @@ class Portal:
             cache = self.db.read(user_id, "cache", EMPTY)
             connections = {source: {"configured": self.ready(source), "connected": bool(secret.get(source)),
                                      "status": cache["providers"].get(source)} for source in ("canvas", "classroom")}
+            for source, token in secret.items():
+                if source in connections and token.get("kind") == "personal":
+                    connections[source].update(mode="token", label=token.get("label", ""))
+                elif source in connections:
+                    connections[source].update(mode="oauth")
             browser = self.browser.info(user_id)
             for source, binding in browser["bindings"].items():
                 connections[source].update(connected=True, mode="browser", label=binding["label"])
@@ -145,8 +150,8 @@ class Portal:
             token, _ = request_json(endpoint, form=form)
             if not token.get("access_token") or not token.get("refresh_token"):
                 raise UserError("平台没有返回可持续使用的授权，请重新连接并同意离线访问。")
-            if source == "classroom" and not set(SCOPES).issubset(set(token.get("scope", "").split())):
-                raise UserError("请同意课程、作业、公告和资料的只读权限后再连接。")
+            if source == "classroom" and not set(SCOPES[:2]).issubset(set(token.get("scope", "").split())):
+                raise UserError("请至少同意“查看课程”和“查看你的作业与成绩”两项只读权限后再连接。")
             token["expires_at"] = time.time() + token.get("expires_in", 3600)
             secret = self.db.read(user_id, "secrets", {})
             secret[source] = token
@@ -158,12 +163,54 @@ class Portal:
             self.clear_cache(user_id, source)
         self.schedule(user_id)
 
+    def save_canvas_token(self, user_id: int, value) -> dict:
+        """Store a Canvas personal access token after checking it against /users/self.
+
+        Students can generate one at Account > Settings > New Access Token without any
+        school-side Developer Key. The token is only ever sent to the configured Canvas host.
+        """
+        token = value.strip() if isinstance(value, str) else ""
+        if not re.fullmatch(r"[A-Za-z0-9~_.\-]{20,200}", token):
+            raise UserError("请粘贴 Canvas「设置 → 新建访问许可证」生成的完整令牌。")
+        with self.lock:
+            if user_id in self.busy:
+                raise UserError("同步进行中，请稍后再保存令牌。")
+        try:
+            profile, _ = request_json(self.canvas + "/api/v1/users/self", token)
+        except UserError as error:
+            if "授权已过期" in str(error):
+                raise UserError("Canvas 不接受这个令牌：可能复制不完整、已过期或已删除，请重新生成后粘贴。") from None
+            raise
+        if not isinstance(profile, dict) or "id" not in profile:
+            raise UserError("Canvas 没有返回账号信息，请确认令牌和 Canvas 地址。")
+        label = str(profile.get("name") or profile.get("short_name") or profile["id"])[:80]
+        with self.lock:
+            if user_id in self.busy:
+                raise UserError("同步进行中，请稍后再保存令牌。")
+            secret = self.db.read(user_id, "secrets", {})
+            previous = secret.get("canvas") or {}
+            same_account = previous.get("kind") == "personal" and previous.get("account") == str(profile["id"])
+            secret["canvas"] = {"kind": "personal", "access_token": token, "label": label,
+                                "account": str(profile["id"]), "saved_at": time.time()}
+            self.db.write(user_id, "secrets", secret)
+            browser = self.db.read(user_id, "browser", {"bindings": {}, "requests": {}})
+            browser["bindings"].pop("canvas", None)
+            browser["requests"].pop("canvas", None)
+            self.db.write(user_id, "browser", browser)
+            if not same_account:
+                self.clear_cache(user_id, "canvas")
+        self.schedule(user_id)
+        return {"ok": True, "label": label}
+
     def access_token(self, user_id: int, source: str) -> str:
         with self.lock:
             secret = self.db.read(user_id, "secrets", {})
             token = secret.get(source)
             if not token:
                 raise UserError("请先连接这个平台。")
+            if token.get("kind") == "personal":
+                # Personal tokens have no refresh flow; a 401 tells the user to make a new one.
+                return token["access_token"]
             if token.get("expires_at", 0) <= time.time() + 60:
                 setting = self.config.get(source, {})
                 form = {"client_id": setting.get("client_id", ""), "client_secret": setting.get("client_secret", ""),
@@ -220,7 +267,11 @@ class Portal:
                 old = cache["providers"].get(source, {})
                 try:
                     token = self.access_token(user_id, source)
-                    batch = fetch_canvas(self.canvas, token) if source == "canvas" else fetch_classroom(token)
+                    if source == "canvas":
+                        batch = fetch_canvas(self.canvas, token)
+                    else:
+                        scope = secret[source].get("scope")
+                        batch = fetch_classroom(token, set(scope.split()) if scope else None)
                     cache["items"] = merge_batch(cache["items"], source, batch)
                     cache["courses"] = [c for c in cache["courses"] if c["source"] != source] + batch.courses
                     cache["resources"] = merge_resources(cache["resources"], source, batch)
@@ -384,10 +435,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/health":
                 return self.json({"app": "study-dock", "version": "0.3.0", "browser_collector": True})
-            if path in ("/", "/app.js", "/browser.js", "/assistant.js", "/style.css"):
+            if path in ("/", "/app.js", "/browser.js", "/connect.js", "/assistant.js", "/style.css"):
                 filename = "index.html" if path == "/" else path[1:]
                 types = {"index.html": "text/html; charset=utf-8", "app.js": "text/javascript; charset=utf-8",
-                         "browser.js": "text/javascript; charset=utf-8", "assistant.js": "text/javascript; charset=utf-8", "style.css": "text/css; charset=utf-8"}
+                         "browser.js": "text/javascript; charset=utf-8", "connect.js": "text/javascript; charset=utf-8", "assistant.js": "text/javascript; charset=utf-8", "style.css": "text/css; charset=utf-8"}
                 return self.send((ROOT / "static" / filename).read_bytes(), content_type=types[filename])
             if path == "/extension.zip":
                 output = io.BytesIO()
@@ -495,6 +546,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json({"ok": True})
             if path == "/api/sync":
                 return self.json({"started": self.app.schedule(user_id)})
+            if path == "/api/canvas-token":
+                return self.json(self.app.save_canvas_token(user_id, body.get("token")))
             if path == "/api/connect":
                 return self.json({"url": self.app.connect_url(user_id, session["id"], body.get("source", ""))})
             if path == "/api/disconnect":

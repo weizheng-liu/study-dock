@@ -135,6 +135,49 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(self.portal.db.read(self.uid, "secrets", {})["classroom"]["access_token"], "previous")
         self.assertEqual(self.portal.db.read(self.uid, "cache", EMPTY)["items"][0]["id"], "cached")
 
+    @patch("core.request_json")
+    @patch("app.request_json")
+    def test_canvas_personal_token_syncs_without_oauth_app_or_browser(self, verify, read_api):
+        portal = Portal(Path(self.temp.name) / "token", {})  # no OAuth client configured at all
+        uid = portal.db.register("token-student", "test-password-one")
+        portal.db.write(uid, "browser", {"bindings": {"canvas": {"label": "old", "account_hash": "x"}}, "requests": {}})
+        verify.return_value = ({"id": 42, "name": "山田 太郎"}, {})
+        token = "1234~" + "a" * 60
+        # Personal tokens are sent as-is to Canvas and never go through an OAuth refresh.
+        read_api.side_effect = lambda url, sent="", form=None: self.fake_read_api(
+            url, "canvas-access" if sent == token else sent, form)
+        with self.assertRaises(UserError):
+            portal.save_canvas_token(uid, "not a token")
+        self.assertEqual(portal.save_canvas_token(uid, f"  {token}\n"), {"ok": True, "label": "山田 太郎"})
+        self.assertEqual(verify.call_args.args, ("https://nu.instructure.com/api/v1/users/self", token))
+        portal.executor.shutdown(wait=True)
+        state = portal.state(uid)
+        self.assertEqual(state["connections"]["canvas"]["mode"], "token")
+        self.assertEqual(state["connections"]["canvas"]["label"], "山田 太郎")
+        self.assertNotIn("canvas", state["browser"]["bindings"])
+        self.assertEqual([item["title"] for item in state["items"]], ["计算题"])
+        self.assertEqual(state["items"][0]["due_at"], "2026-11-19T14:59:00+00:00")
+        self.assertNotIn(token, str(state))
+        self.assertEqual(portal.state(uid)["providers"]["canvas"]["state"], "ok")
+        self.assertEqual(portal.access_token(uid, "canvas"), token)
+
+    @patch("core.request_json")
+    @patch("app.request_json")
+    def test_classroom_core_scopes_suffice_and_optional_kinds_are_skipped(self, exchange, read_api):
+        read_api.side_effect = self.fake_read_api
+        _, query = self.query("classroom")
+        exchange.return_value = ({"access_token": "classroom-access", "refresh_token": "r", "expires_in": 3600,
+                                  "scope": " ".join(SCOPES[:2])}, {})
+        self.portal.callback(self.uid, "session-one", "classroom", query)
+        self.wait_for_sync()
+        state = self.portal.state(self.uid)
+        self.assertEqual(state["connections"]["classroom"]["mode"], "oauth")
+        self.assertEqual(state["providers"]["classroom"]["state"], "ok")
+        self.assertEqual(state["items"][0]["due_at"], "2026-11-20T14:59:00+00:00")
+        self.assertEqual(state["resources"], [])
+        called = {urlsplit(c.args[0]).path.rsplit("/", 1)[-1] for c in read_api.call_args_list}
+        self.assertNotIn("announcements", called)
+
     def test_attachment_relative_paths_and_titles(self):
         links = html_links('<a href="../files/7"><b>题目</b> PDF</a><a href="#note">注</a><a href="javascript:bad()">坏链接</a>',
                            "https://nu.instructure.com/courses/11/assignments/101")
