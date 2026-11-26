@@ -22,6 +22,10 @@ SCOPES = ["https://www.googleapis.com/auth/classroom.courses.readonly",
 class UserError(Exception):
     """A safe, actionable error; never contains a response body or credential."""
 
+    def __init__(self, message: str = "", status: int | None = None):
+        super().__init__(message)
+        self.status = status  # HTTP status from the platform, when there was one
+
 
 def now_iso() -> str:
     return datetime.now(UTC).isoformat()
@@ -160,7 +164,7 @@ def request_json(url: str, token: str = "", form: dict | None = None) -> tuple:
                 message = "Google 授权失效或配置不匹配，请重新连接。"
             else:
                 message = f"平台返回 HTTP {code}，请稍后重试。"
-            raise UserError(message) from None
+            raise UserError(message, status=code) from None
         except (URLError, TimeoutError, OSError):
             raise UserError("暂时无法连接平台，请检查网络；上次缓存会保留。") from None
         except (ValueError, UnicodeError):
@@ -296,7 +300,12 @@ def canvas_resources(base: str, token: str, course: dict) -> tuple:
                     "attachments": html_links(raw.get("message", ""), url),
                     "updated_at": raw.get("updated_at") or raw.get("posted_at"), "group": ""})
             records.extend(normalized)
-        except (UserError, ValueError, KeyError, TypeError) as error:
+        except UserError as error:
+            if error.status in (403, 404):
+                continue  # the teacher hid this tab (Files/Pages/...) from students: nothing to read
+            failed.add(f"{course['id']}:{kind}")
+            warnings.append(f"{course.get('name', '课程')}（{kind}）：{error}")
+        except (ValueError, KeyError, TypeError) as error:
             failed.add(f"{course['id']}:{kind}")
             detail = str(error) if isinstance(error, UserError) else "资料格式异常。"
             warnings.append(f"{course.get('name', '课程')}（{kind}）：{detail}")
@@ -323,7 +332,9 @@ def fetch_canvas(base: str, token: str) -> Batch:
     return batch
 
 
-def fetch_classroom(token: str) -> Batch:
+def fetch_classroom(token: str, granted: set | None = None) -> Batch:
+    """Read the student's own Classroom data. `granted` lists OAuth scopes the user
+    actually approved; optional resource kinds without consent are skipped, not failed."""
     root = "https://classroom.googleapis.com/v1/courses"
     courses = google_pages(root, token, "courses", {"studentId": "me", "courseStates": "ACTIVE"})
     batch = Batch(course_ids={str(c["id"]) for c in courses})
@@ -345,8 +356,10 @@ def fetch_classroom(token: str) -> Batch:
             batch.failed_courses.add(str(course["id"]))
             detail = str(error) if isinstance(error, UserError) else "作业日期或数据格式异常。"
             batch.warnings.append(f"{course.get('name', '课程')}：{detail}")
-        for kind, endpoint, key in [("material", "courseWorkMaterials", "courseWorkMaterial"),
-                                    ("announcement", "announcements", "announcements")]:
+        for kind, endpoint, key, scope in [("material", "courseWorkMaterials", "courseWorkMaterial", SCOPES[2]),
+                                           ("announcement", "announcements", "announcements", SCOPES[3])]:
+            if granted is not None and scope not in granted:
+                continue
             try:
                 resources = []
                 for item in google_pages(root + f"/{course['id']}/{endpoint}", token, key):

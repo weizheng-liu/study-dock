@@ -13,7 +13,7 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app import EMPTY, Portal
+from app import EMPTY, TOKEN_EXPIRED, Portal
 from core import SCOPES, UserError, export_ics, html_links
 
 
@@ -134,6 +134,102 @@ class ConnectionTests(unittest.TestCase):
             self.portal.callback(self.uid, "session-one", "classroom", query)
         self.assertEqual(self.portal.db.read(self.uid, "secrets", {})["classroom"]["access_token"], "previous")
         self.assertEqual(self.portal.db.read(self.uid, "cache", EMPTY)["items"][0]["id"], "cached")
+
+    @patch("core.request_json")
+    @patch("app.request_json")
+    def test_canvas_personal_token_syncs_without_oauth_app_or_browser(self, verify, read_api):
+        portal = Portal(Path(self.temp.name) / "token", {})  # no OAuth client configured at all
+        uid = portal.db.register("token-student", "test-password-one")
+        portal.db.write(uid, "browser", {"bindings": {"canvas": {"label": "old", "account_hash": "x"}}, "requests": {}})
+        verify.return_value = ({"id": 42, "name": "山田 太郎"}, {})
+        token = "1234~" + "a" * 60
+        # Personal tokens are sent as-is to Canvas and never go through an OAuth refresh.
+        read_api.side_effect = lambda url, sent="", form=None: self.fake_read_api(
+            url, "canvas-access" if sent == token else sent, form)
+        with self.assertRaises(UserError):
+            portal.save_canvas_token(uid, "not a token")
+        self.assertEqual(portal.save_canvas_token(uid, f"  {token}\n"), {"ok": True, "label": "山田 太郎"})
+        self.assertEqual(verify.call_args.args, ("https://nu.instructure.com/api/v1/users/self", token))
+        portal.executor.shutdown(wait=True)
+        state = portal.state(uid)
+        self.assertEqual(state["connections"]["canvas"]["mode"], "token")
+        self.assertEqual(state["connections"]["canvas"]["label"], "山田 太郎")
+        self.assertNotIn("canvas", state["browser"]["bindings"])
+        self.assertEqual([item["title"] for item in state["items"]], ["计算题"])
+        self.assertEqual(state["items"][0]["due_at"], "2026-11-19T14:59:00+00:00")
+        self.assertNotIn(token, str(state))
+        self.assertEqual(portal.state(uid)["providers"]["canvas"]["state"], "ok")
+        self.assertEqual(portal.access_token(uid, "canvas"), token)
+
+    @patch("core.request_json")
+    @patch("app.request_json")
+    def test_canvas_token_expiry_is_tracked_and_reported(self, verify, read_api):
+        from datetime import datetime, timedelta, timezone
+        portal = Portal(Path(self.temp.name) / "expiry", {})
+        uid = portal.db.register("expiry-student", "test-password-one")
+        token = "1234~" + "b" * 60
+        verify.return_value = ({"id": 7, "name": "学生"}, {})
+        read_api.side_effect = UserError("授权已过期，请重新连接账号。")
+        today = datetime.now(timezone(timedelta(hours=9))).date()
+        with self.assertRaises(UserError):
+            portal.save_canvas_token(uid, token, (today - timedelta(days=1)).isoformat())
+        with self.assertRaises(UserError):
+            portal.save_canvas_token(uid, token, "30 days")
+        portal.save_canvas_token(uid, token, (today + timedelta(days=2)).isoformat())
+        portal.executor.shutdown(wait=True)
+        canvas = portal.state(uid)["connections"]["canvas"]
+        self.assertTrue(canvas["token_expiring"])
+        self.assertEqual(canvas["token_days_left"], 2)
+        # A 401 from Canvas (token deleted early) becomes an explicit "regenerate" message.
+        self.assertEqual(canvas["status"]["message"], TOKEN_EXPIRED)
+        self.assertTrue(canvas["status"]["token_expired"])
+        # Past the recorded expiry, no request is sent at all.
+        secret = portal.db.read(uid, "secrets", {})
+        secret["canvas"]["expires_at"] = time.time() - 60
+        portal.db.write(uid, "secrets", secret)
+        read_api.reset_mock()
+        portal.sync(uid)
+        read_api.assert_not_called()
+        canvas = portal.state(uid)["connections"]["canvas"]
+        self.assertEqual(canvas["token_days_left"], -1)
+        self.assertEqual(canvas["status"]["message"], TOKEN_EXPIRED)
+
+    @patch("core.request_json")
+    def test_canvas_tabs_hidden_from_students_are_not_warnings(self, read_api):
+        from core import fetch_canvas
+
+        def hidden(url, token="", form=None):
+            path = urlsplit(url).path
+            if path.endswith("/files"):
+                raise UserError("账号或学校未允许此接口访问，请检查授权或联系学校管理员。", status=403)
+            if path.endswith("/pages"):
+                raise UserError("平台返回 HTTP 404，请稍后重试。", status=404)
+            if path.endswith("/discussion_topics"):
+                raise UserError("平台返回 HTTP 500，请稍后重试。", status=500)
+            return self.fake_read_api(url, token, form)
+        read_api.side_effect = hidden
+        batch = fetch_canvas("https://nu.instructure.com", "canvas-access")
+        self.assertEqual(len(batch.items), 1)
+        self.assertEqual({r["kind"] for r in batch.resources}, {"module"})
+        self.assertEqual(batch.failed_resources, {"11:announcement"})
+        self.assertEqual(len(batch.warnings), 1)
+
+    @patch("core.request_json")
+    @patch("app.request_json")
+    def test_classroom_core_scopes_suffice_and_optional_kinds_are_skipped(self, exchange, read_api):
+        read_api.side_effect = self.fake_read_api
+        _, query = self.query("classroom")
+        exchange.return_value = ({"access_token": "classroom-access", "refresh_token": "r", "expires_in": 3600,
+                                  "scope": " ".join(SCOPES[:2])}, {})
+        self.portal.callback(self.uid, "session-one", "classroom", query)
+        self.wait_for_sync()
+        state = self.portal.state(self.uid)
+        self.assertEqual(state["connections"]["classroom"]["mode"], "oauth")
+        self.assertEqual(state["providers"]["classroom"]["state"], "ok")
+        self.assertEqual(state["items"][0]["due_at"], "2026-11-20T14:59:00+00:00")
+        self.assertEqual(state["resources"], [])
+        called = {urlsplit(c.args[0]).path.rsplit("/", 1)[-1] for c in read_api.call_args_list}
+        self.assertNotIn("announcements", called)
 
     def test_attachment_relative_paths_and_titles(self):
         links = html_links('<a href="../files/7"><b>题目</b> PDF</a><a href="#note">注</a><a href="javascript:bad()">坏链接</a>',
