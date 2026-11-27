@@ -22,6 +22,8 @@ python app.py --open
 
 **推荐先用官方接口同步**：Canvas 粘贴个人访问令牌即可，Classroom 需自建一次 Google OAuth 客户端；连好后由本机服务直接拉取，不用开网页。步骤见 [官方接口设置](docs/api-setup.zh-CN.md)。学校不允许时，再用下面的采集扩展兜底。
 
+**课程大纲（シラバス）**：「课程大纲」页直接查日本大学理工学部官网公开的シラバス（科目名、老师名、时间割代码都能搜，全角半角不敏感），不用登录。在课程页的「课程大纲」标签把大纲关联到 Canvas / Classroom 课程后，学习助手回答评分方法、教材、每回内容时会引用它。学校数据缓存在 `data/syllabus/`，科目列表每天刷新一次。
+
 手动安装时，在 Chrome 或 Edge 扩展管理页启用开发者模式并加载 `extension/`。在「账号连接」生成一次性配对码，然后在采集助手里配对。学校账号在官方网页登录。默认 Canvas 站点为 `nu.instructure.com`。 [采集助手安装说明](extension/README.md)
 
 ## 测试
@@ -48,6 +50,8 @@ python app.py --open
 Open [the local dashboard](http://127.0.0.1:8840/). The three Windows launchers open the dashboard by itself, or open the dashboard and collector in a dedicated Edge or Chrome profile. Load the collector manually the first time you use the dedicated Chrome profile.
 
 Preferred: sync through the official APIs. Paste a Canvas personal access token, and create a Google OAuth client once for Classroom; see [API setup (Chinese)](docs/api-setup.zh-CN.md). The browser collector remains as a fallback.
+
+Syllabus lookup: the "课程大纲" page searches the public syllabus of Nihon University College of Science and Technology (no login). Link a syllabus to a synced course so the study assistant can cite it.
 
 To install it manually, enable developer mode in Chrome or Edge, load `extension/` as an unpacked extension, and pair it with the one-time code from the dashboard. Sign in to school platforms on their official websites. The default Canvas integration targets `nu.instructure.com`.
 
