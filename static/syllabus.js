@@ -4,13 +4,26 @@
 let syllabusOptions = null, syllabusLoading = false, syllabusError = '';
 let syllabusQuery = '', syllabusResults = null, syllabusSearching = false, syllabusEditing = false;
 const syllabusDetails = {}, syllabusSuggestions = {};
+let syllabusOwner, syllabusEpoch = 0;
 
-async function loadSyllabusOptions(force = false) {
-  if (syllabusLoading || (syllabusOptions && !force)) return;
-  syllabusLoading = true; syllabusError = '';
-  try { syllabusOptions = await api('/api/syllabus/options', {}); }
-  catch (error) { syllabusError = error.message; }
-  finally { syllabusLoading = false; render(); }
+/* Preferences, results and suggestions belong to one account: drop them when it changes. */
+function syllabusAccount(user) {
+  const owner = user?.id ?? user?.name ?? null;
+  if (owner === syllabusOwner) return;
+  syllabusOwner = owner; syllabusEpoch++;
+  syllabusOptions = null; syllabusLoading = false; syllabusError = '';
+  syllabusQuery = ''; syllabusResults = null; syllabusSearching = false; syllabusEditing = false;
+  for (const key of Object.keys(syllabusSuggestions)) delete syllabusSuggestions[key];
+}
+
+/* Loads once; after a failure it waits for the retry button instead of looping on render(). */
+async function loadSyllabusOptions() {
+  if (syllabusLoading || syllabusOptions || syllabusError) return;
+  const epoch = syllabusEpoch;
+  syllabusLoading = true;
+  try { const options = await api('/api/syllabus/options', {}); if (epoch === syllabusEpoch) syllabusOptions = options; }
+  catch (error) { if (epoch === syllabusEpoch) syllabusError = error.message; }
+  finally { if (epoch === syllabusEpoch) { syllabusLoading = false; if (route === 'syllabus') render(); } }
 }
 
 function syllabusDepartmentName(prefs, code) {
@@ -19,13 +32,18 @@ function syllabusDepartmentName(prefs, code) {
 }
 
 function renderSyllabus(main) {
+  syllabusAccount(state.user);
   const actions = E('div', 'row');
   if (syllabusOptions?.prefs && !syllabusEditing) actions.append(button('更改年度 / 学科', () => { syllabusEditing = true; render(); }, 'button secondary'));
   main.append(heading('课程大纲', '直接查日大理工学部官网公开的シラバス：授课计划、评分方法、教材，一页看完。', actions));
   if (demo) return main.append(empty('演示模式不查询学校网站，请登录后使用。'));
+  if (!syllabusOptions && syllabusError) {
+    main.append(empty(syllabusError));
+    return main.append(button('重试', () => { syllabusError = ''; render(); }, 'button secondary'));
+  }
   if (!syllabusOptions) {
     loadSyllabusOptions();
-    return main.append(empty(syllabusError || '正在读取学校公开的年度和学科列表…'));
+    return main.append(empty('正在读取学校公开的年度和学科列表…'));
   }
   if (!syllabusOptions.prefs || syllabusEditing) return main.append(syllabusSetup());
   const prefs = syllabusOptions.prefs;
@@ -93,10 +111,11 @@ function syllabusSetup() {
 async function searchSyllabus(value) {
   const query = value.trim();
   if (!query || syllabusSearching) return;
+  const epoch = syllabusEpoch;
   syllabusSearching = true; render();
-  try { syllabusResults = await api('/api/syllabus/search', {query}); }
-  catch (error) { toast(error.message); }
-  finally { syllabusSearching = false; if (route === 'syllabus') render(); }
+  try { const result = await api('/api/syllabus/search', {query}); if (epoch === syllabusEpoch) syllabusResults = result; }
+  catch (error) { if (epoch === syllabusEpoch) toast(error.message); }
+  finally { if (epoch === syllabusEpoch) { syllabusSearching = false; if (route === 'syllabus') render(); } }
 }
 
 function syllabusRow(row, course) {
@@ -198,6 +217,7 @@ function syllabusLinkedPanel() {
 
 /* Course page tab: show the linked syllabus, or suggest matches from the course name. */
 function renderCourseSyllabus(content, course) {
+  syllabusAccount(state.user);
   if (demo) return content.append(empty('演示模式不查询学校网站。'));
   const linked = (state.syllabus_links || {})[course.id];
   if (linked) {
@@ -215,10 +235,12 @@ function renderCourseSyllabus(content, course) {
   }
   const entry = syllabusSuggestions[course.id];
   if (!entry) {
+    const epoch = syllabusEpoch;
     syllabusSuggestions[course.id] = {loading: true};
     api('/api/syllabus/suggest', {course: course.id})
-      .then(result => { syllabusSuggestions[course.id] = result; }, error => { syllabusSuggestions[course.id] = {error: error.message}; })
-      .finally(() => { if (courseId === course.id && courseTab === 'syllabus') render(); });
+      .then(result => { if (epoch === syllabusEpoch) syllabusSuggestions[course.id] = result; },
+            error => { if (epoch === syllabusEpoch) syllabusSuggestions[course.id] = {error: error.message}; })
+      .finally(() => { if (epoch === syllabusEpoch && courseId === course.id && courseTab === 'syllabus') render(); });
     return content.append(empty('正在按课程名匹配学校シラバス…'));
   }
   if (entry.loading) return content.append(empty('正在按课程名匹配学校シラバス…'));
