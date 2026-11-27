@@ -25,6 +25,7 @@ from core import (SCOPES, UserError, canvas_base, demo_items, export_ics, fetch_
 from storage import Database
 from browser_bridge import BrowserBridge
 import study_assistant
+import syllabus
 
 ROOT = Path(__file__).resolve().parent
 EMPTY = {"items": [], "courses": [], "resources": [], "providers": {}, "last_attempt_at": None}
@@ -74,6 +75,72 @@ class Portal:
         self.stop = threading.Event()
         self.browser = BrowserBridge(self)
         self.text_drafts = {}
+        self.syllabus = syllabus.SyllabusService(directory / "syllabus")
+
+    # ---------- school syllabus (public data, per-user preferences and course links) ----------
+    def syllabus_doc(self, uid):
+        doc = self.db.read(uid, "syllabus", {})
+        return {"prefs": doc.get("prefs"), "links": doc.get("links", {}), "details": doc.get("details", {})}
+
+    def syllabus_options(self, uid):
+        doc = self.syllabus_doc(uid)
+        options = self.syllabus.options()
+        return dict(options, prefs=doc["prefs"], links=doc["links"])
+
+    def syllabus_prefs(self, uid, body):
+        prefs = self.syllabus.check_prefs(body)
+        with self.lock:
+            doc = self.syllabus_doc(uid)
+            doc["prefs"] = prefs
+            self.db.write(uid, "syllabus", doc)
+        return {"ok": True, "prefs": prefs}
+
+    def syllabus_prefs_required(self, uid):
+        prefs = self.syllabus_doc(uid)["prefs"]
+        if not prefs:
+            raise UserError("请先在「课程大纲」页选择年度和学科。")
+        return prefs
+
+    def syllabus_course(self, uid, key):
+        courses = self.db.read(uid, "cache", EMPTY)["courses"]
+        course = next((c for c in courses if isinstance(key, str) and c["id"] == key), None)
+        if not course:
+            raise UserError("找不到这门已同步的课程。")
+        return course
+
+    def syllabus_suggest(self, uid, body):
+        course = self.syllabus_course(uid, body.get("course"))
+        prefs = self.syllabus_prefs_required(uid)
+        return {"suggestions": syllabus.suggest(course["name"], self.syllabus.catalog(prefs)),
+                "link": self.syllabus_doc(uid)["links"].get(course["id"])}
+
+    def syllabus_link(self, uid, body):
+        course = self.syllabus_course(uid, body.get("course"))
+        detail = None
+        if body.get("code"):
+            detail = self.syllabus.detail(body.get("nendo"), body.get("faculty", "1"), body.get("code"))
+        with self.lock:
+            doc = self.syllabus_doc(uid)
+            old = doc["links"].pop(course["id"], None)
+            if detail:
+                doc["links"][course["id"]] = {k: detail[k] for k in ("code", "nendo", "faculty", "title", "url")}
+                doc["details"][detail["code"] + "@" + detail["nendo"]] = detail
+            in_use = {l["code"] + "@" + l["nendo"] for l in doc["links"].values()}
+            doc["details"] = {k: v for k, v in doc["details"].items() if k in in_use}
+            self.db.write(uid, "syllabus", doc)
+        return {"ok": True, "link": doc["links"].get(course["id"]), "previous": old}
+
+    def syllabus_context(self, uid):
+        """Syllabi linked to the user's courses, for the study assistant."""
+        doc = self.syllabus_doc(uid)
+        names = {c["id"]: c["name"] for c in self.db.read(uid, "cache", EMPTY)["courses"]}
+        rows = []
+        for course_id, link in doc["links"].items():
+            detail = doc["details"].get(link["code"] + "@" + link["nendo"])
+            if detail and course_id in names:
+                source, _, cid = course_id.partition(":")
+                rows.append({"source": source, "course_id": cid, "course": names[course_id], "detail": detail})
+        return rows
 
     def assignment(self, uid, *, item_id=None, url=None):
         items = self.db.read(uid, "cache", EMPTY)["items"]
@@ -132,7 +199,8 @@ class Portal:
             for source, binding in browser["bindings"].items():
                 connections[source].update(connected=True, mode="browser", label=binding["label"])
             return dict(cache, user=self.db.user(user_id), connections=connections,
-                        syncing=user_id in self.busy, canvas_url=self.canvas, browser=browser)
+                        syncing=user_id in self.busy, canvas_url=self.canvas, browser=browser,
+                        syllabus_links=self.syllabus_doc(user_id)["links"])
 
     def connect_url(self, user_id: int, session_id: str, source: str) -> str:
         if source not in ("canvas", "classroom"):
@@ -474,10 +542,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/health":
                 return self.json({"app": "study-dock", "version": "0.3.0", "browser_collector": True})
-            if path in ("/", "/app.js", "/browser.js", "/connect.js", "/assistant.js", "/style.css"):
+            if path in ("/", "/app.js", "/browser.js", "/connect.js", "/assistant.js", "/syllabus.js", "/style.css"):
                 filename = "index.html" if path == "/" else path[1:]
                 types = {"index.html": "text/html; charset=utf-8", "app.js": "text/javascript; charset=utf-8",
-                         "browser.js": "text/javascript; charset=utf-8", "connect.js": "text/javascript; charset=utf-8", "assistant.js": "text/javascript; charset=utf-8", "style.css": "text/css; charset=utf-8"}
+                         "browser.js": "text/javascript; charset=utf-8", "connect.js": "text/javascript; charset=utf-8", "syllabus.js": "text/javascript; charset=utf-8", "assistant.js": "text/javascript; charset=utf-8", "style.css": "text/css; charset=utf-8"}
                 return self.send((ROOT / "static" / filename).read_bytes(), content_type=types[filename])
             if path == "/extension.zip":
                 output = io.BytesIO()
@@ -563,7 +631,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json({"error": "请先登录。"}, 401)
             user_id = session["user_id"]
             if path == "/api/assistant/ask":
-                return self.json(study_assistant.ask(ROOT, self.app.db.read(user_id, "cache", EMPTY), body))
+                cache = dict(self.app.db.read(user_id, "cache", EMPTY), syllabi=self.app.syllabus_context(user_id))
+                return self.json(study_assistant.ask(ROOT, cache, body))
+            if path == "/api/syllabus/options":
+                return self.json(self.app.syllabus_options(user_id))
+            if path == "/api/syllabus/prefs":
+                return self.json(self.app.syllabus_prefs(user_id, body))
+            if path == "/api/syllabus/search":
+                prefs = self.app.syllabus_prefs_required(user_id)
+                return self.json(self.app.syllabus.search(prefs, body.get("query")))
+            if path == "/api/syllabus/detail":
+                return self.json(self.app.syllabus.detail(body.get("nendo"), body.get("faculty", "1"), body.get("code")))
+            if path == "/api/syllabus/suggest":
+                return self.json(self.app.syllabus_suggest(user_id, body))
+            if path == "/api/syllabus/link":
+                return self.json(self.app.syllabus_link(user_id, body))
             if path in ("/api/assistant/draft", "/api/assistant/save-draft"):
                 item = self.app.assignment(user_id, item_id=body.get("id"))
                 if path.endswith("/save-draft"):

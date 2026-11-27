@@ -14,3 +14,11 @@
 .assistant-source {margin-top:.4rem}
 .api-steps{margin:14px 0 4px 18px;line-height:1.9}.api-token-form{margin:12px 0}.api-token-form .input{flex:1}.fallback-title{margin:40px 0 4px}
 .api-token-expiry{flex:0 0 auto;min-width:150px}
+.syllabus-setup{display:grid;gap:14px}
+.syllabus-departments{display:flex;flex-wrap:wrap;gap:8px 18px}
+.syllabus-schedule{display:grid;gap:8px}
+.syllabus-week{border-left:3px solid var(--line,#ddd);padding:4px 0 4px 12px}
+.syllabus-week strong{display:block;font-size:.85rem;margin-bottom:2px}
+.syllabus-result{display:flex;gap:12px;align-items:flex-start;justify-content:space-between}.syllabus-result .row{flex:none}@media(max-width:760px){.syllabus-result{flex-direction:column}}
+.tabs{overflow-x:auto}.tab{white-space:nowrap}
+.main>.panel+.panel{margin-top:18px}
